@@ -20,6 +20,12 @@ data MyCallStack
   | PushCallStack [Char] SrcLoc MyCallStack
   | FreezeCallStack MyCallStack deriving (Show, Generic)
 
+data CallStackMini
+  = EmptyCallStackMini
+  | PushCallStackMini () () CallStackMini
+  | CallStackMini CallStackMini deriving (Show, Generic)
+
+
 data CustomException = CustomException String CallStack deriving (Show, Generic)
 instance Exception CustomException
 instance NFData CustomException
@@ -28,6 +34,11 @@ data CustomException2 = CustomException2 String MyCallStack deriving (Show, Gene
 instance Exception CustomException2
 instance NFData MyCallStack
 instance NFData CustomException2
+
+data CustomException3 = CustomException3 String CallStackMini deriving (Show, Generic)
+instance Exception CustomException3
+instance NFData CallStackMini
+instance NFData CustomException3
 
 -- TODO: Is this the correct way to implement an NFData for SomeException?
 -- instance NFData SomeException where
@@ -83,9 +94,22 @@ recurCSExplicit cs n = do
   x <- recurCSExplicit (PushCallStack "recurCSExplicit" spuriousSrcLoc cs) (n - 1)
   pure (t:x)
 
+recurCSExplicitMini :: CallStackMini -> Int -> IO [UTCTime]
+recurCSExplicitMini cs 1 = do
+  t <- getCurrentTime
+  pure [t]
+recurCSExplicitMini cs 3 = do
+  throw $ CustomException3 "Error from CS version" (PushCallStackMini () () cs)
+recurCSExplicitMini cs n = do
+  t <- getCurrentTime
+  x <- recurCSExplicitMini (PushCallStackMini () () cs) (n - 1)
+  pure (t:x)
+
+
 catchExceptions :: (Int -> IO [UTCTime]) -> Int -> IO ()
 catchExceptions fn n = catches runFn [ Handler $ \ ((!e) :: CustomException) -> e `deepseq` pure ()
                                      , Handler $ \ ((!e) :: CustomException2) -> e `deepseq` pure ()
+                                     , Handler $ \ ((!e) :: CustomException3) -> e `deepseq` pure ()
                                      ]
   where
     runFn = do
@@ -95,15 +119,17 @@ catchExceptions fn n = catches runFn [ Handler $ \ ((!e) :: CustomException) -> 
 main :: IO ()
 main = do
   let myCallStack = EmptyCallStack
+      callStackMini = EmptyCallStackMini
   defaultMain
     [
       bgroup "recur" $
       Prelude.concatMap
       (\x -> [ bench ("regular/" ++ (show x)) $ nfIO $ catchExceptions recur x
              , bench ("HasCallStack/" ++ (show x)) $ nfIO $ catchExceptions recurCS x
-             , bench ("explicit/" ++ (show x)) $ nfIO $ catchExceptions recurCS x
+             , bench ("explicit/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicit myCallStack) x
+             , bench ("explicitMini/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicitMini callStackMini) x
              ])
-      [10, 100, 1000, 10000]
+      [10, 100]
     -- [ bench "regular/100" $ nfIO $ catchExceptions recur 100
     -- , bench "callstack/100" $ nfIO $ catchExceptions recurCS 100
     -- , bench "regular/200" $ nfIO $ catchExceptions recur 200
