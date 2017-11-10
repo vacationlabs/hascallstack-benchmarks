@@ -2,6 +2,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
@@ -14,6 +15,7 @@ import Control.DeepSeq
 import Data.Time
 import GHC.Generics
 import Prelude
+import System.Random
 
 data MyCallStack
   = EmptyCallStack
@@ -54,25 +56,28 @@ factorial 1 = 1
 factorial 3 = throw $ CustomException "Error from non-CS version" emptyCallStack
 factorial n = n * factorial (n - 1)
 
-recur :: Int -> IO [UTCTime]
-recur 1 = do
-  t <- getCurrentTime
-  pure [t]
-recur 3 = throw $ CustomException "Error from non-CS version" emptyCallStack
-recur n = do
-  t <- getCurrentTime
-  x <- recur (n - 1)
-  pure (t:x)
+recur :: Int -> Bool -> IO [UTCTime]
+recur n b = case (b, n) of
+  (True, 3) -> throw $ CustomException "Error from non-CS version" emptyCallStack
+  (_, 1) -> getCurrentTime >>= (\t -> pure [t])
+  _ -> do
+    t <- getCurrentTime
+    x <- recur (n - 1) b
+    pure (t:x)
 
-recurCS :: (HasCallStack) => Int -> IO [UTCTime]
-recurCS 1 = do
-  t <- getCurrentTime
-  pure [t]
-recurCS 3 = throw $ CustomException "Error from CS version" callStack
-recurCS n = do
-  t <- getCurrentTime
-  x <- recurCS (n - 1)
-  pure (t:x)
+shouldThrowError :: IO Bool
+shouldThrowError = do
+  r :: Int <- randomRIO (0, 100)
+  pure (r < 20)
+
+recurCS :: (HasCallStack) => Int -> Bool -> IO [UTCTime]
+recurCS n b = case (b, n) of
+  (True, 3) -> throw $ CustomException "Error from CS version" callStack
+  (_, 1) -> getCurrentTime >>= (\t -> pure [t])
+  _ -> do
+    t <- getCurrentTime
+    x <- recurCS (n - 1) b
+    pure (t:x)
 
 spuriousSrcLoc :: SrcLoc
 spuriousSrcLoc = SrcLoc{ srcLocPackage="hascallstack-benchmarks"
@@ -83,38 +88,35 @@ spuriousSrcLoc = SrcLoc{ srcLocPackage="hascallstack-benchmarks"
                        , srcLocEndLine=0
                        , srcLocEndCol=0}
 
-recurCSExplicit :: MyCallStack -> Int -> IO [UTCTime]
-recurCSExplicit cs 1 = do
-  t <- getCurrentTime
-  pure [t]
-recurCSExplicit cs 3 = do
-  throw $ CustomException2 "Error from CS version" (PushCallStack "recurCSExplicit" spuriousSrcLoc cs)
-recurCSExplicit cs n = do
-  t <- getCurrentTime
-  x <- recurCSExplicit (PushCallStack "recurCSExplicit" spuriousSrcLoc cs) (n - 1)
-  pure (t:x)
+recurCSExplicit :: MyCallStack -> Int -> Bool -> IO [UTCTime]
+recurCSExplicit cs n b = case (b, n) of
+  (True, 3) -> throw $ CustomException2 "Error from CS version" (PushCallStack "recurCSExplicit" spuriousSrcLoc cs)
+  (_, 1) -> getCurrentTime >>= (\t -> pure [t])
+  _ -> do
+    t <- getCurrentTime
+    x <- recurCSExplicit (PushCallStack "recurCSExplicit" spuriousSrcLoc cs) (n - 1) b
+    pure (t:x)
 
-recurCSExplicitMini :: CallStackMini -> Int -> IO [UTCTime]
-recurCSExplicitMini cs 1 = do
-  t <- getCurrentTime
-  pure [t]
-recurCSExplicitMini cs 3 = do
-  throw $ CustomException3 "Error from CS version" (PushCallStackMini () () cs)
-recurCSExplicitMini cs n = do
-  t <- getCurrentTime
-  x <- recurCSExplicitMini (PushCallStackMini () () cs) (n - 1)
-  pure (t:x)
+recurCSExplicitMini :: CallStackMini -> Int -> Bool -> IO [UTCTime]
+recurCSExplicitMini cs n b = case (b, n) of
+  (True, 3) -> throw $ CustomException3 "Error from CS version" (PushCallStackMini () () cs)
+  (_, 1) -> getCurrentTime >>= (\t -> pure [t])
+  _ -> do
+    t <- getCurrentTime
+    x <- recurCSExplicitMini (PushCallStackMini () () cs) (n - 1) b
+    pure (t:x)
 
 
-catchExceptions :: (Int -> IO [UTCTime]) -> Int -> IO ()
+catchExceptions :: (Int -> Bool -> IO [UTCTime]) -> Int -> IO ()
 catchExceptions fn n = catches runFn [ Handler $ \ ((!e) :: CustomException) -> e `deepseq` pure ()
                                      , Handler $ \ ((!e) :: CustomException2) -> e `deepseq` pure ()
                                      , Handler $ \ ((!e) :: CustomException3) -> e `deepseq` pure ()
                                      ]
   where
     runFn = do
-      x <- fn n
-      traceIO (show x)
+      s <- shouldThrowError
+      x <- fn n s
+      x `deepseq` pure ()
 
 main :: IO ()
 main = do
@@ -124,12 +126,12 @@ main = do
     [
       bgroup "recur" $
       Prelude.concatMap
-      (\x -> [ bench ("regular/" ++ (show x)) $ nfIO $ catchExceptions recur x
+      (\x -> [ bench ("no callstack/" ++ (show x)) $ nfIO $ catchExceptions recur x
              , bench ("HasCallStack/" ++ (show x)) $ nfIO $ catchExceptions recurCS x
-             , bench ("explicit/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicit myCallStack) x
-             , bench ("explicitMini/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicitMini callStackMini) x
+             , bench ("explicit callstack/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicit myCallStack) x
+             , bench ("explicit callstack (mini)/" ++ (show x)) $ nfIO $ catchExceptions (recurCSExplicitMini callStackMini) x
              ])
-      [10, 100]
+      [1000, 10000, 100000]
     -- [ bench "regular/100" $ nfIO $ catchExceptions recur 100
     -- , bench "callstack/100" $ nfIO $ catchExceptions recurCS 100
     -- , bench "regular/200" $ nfIO $ catchExceptions recur 200
